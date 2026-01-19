@@ -1,0 +1,116 @@
+import os
+import glob
+import re
+import pandas as pd
+from sqlalchemy import create_engine, text
+from datetime import datetime
+
+# ---- Project root (adjust .. count if your folder depth differs) ----
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", ".."))
+
+# ---- Raw input folder (env override supported) ----
+RAW_DATA_FOLDER = os.getenv(
+    "AMZ_SALES_TRAFFIC_RAW_DIR",
+    os.path.join(PROJECT_ROOT, "data", "raw", "input", "amazon", "business_reports", "sales_traffic_child_asin_daily")
+)
+
+RAW_SCHEMA = "raw"
+RAW_TABLE = "raw_amazon_business_reports_sales_traffic_child_asin_daily"
+
+
+def extract_date_from_filename(filename):
+    """Extract report date from filename like *_YYYY-MM-DD.csv"""
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", filename)
+    if not match:
+        return None
+    return pd.to_datetime(match.group(1), format="%Y-%m-%d").date()
+
+
+def main():
+    db_url = os.getenv("DB_URL")
+    if not db_url:
+        raise ValueError("DB_URL environment variable not set")
+
+    engine = create_engine(db_url)
+
+    # 1) Ensure raw schema exists
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {RAW_SCHEMA};"))
+
+    # 2) Find all CSV files in raw folder (strict pattern)
+    csv_files = glob.glob(
+        os.path.join(RAW_DATA_FOLDER, "raw_amazon_business_reports_sales_traffic_child_asin_daily_*.csv")
+    )
+
+    if not csv_files:
+        raise ValueError(f"No CSV files found in {RAW_DATA_FOLDER}")
+
+    csv_files = sorted(csv_files)  # optional but helpful
+    print(f"Found {len(csv_files)} CSV files to process")
+
+    # 3) Generate load_id (timestamp for this run)
+    load_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    load_ts = datetime.now()
+
+    # 4) Process each file
+    all_data = []
+
+    for filepath in csv_files:
+        filename = os.path.basename(filepath)
+        print(f"Processing: {filename}")
+
+        df = pd.read_csv(filepath)
+
+        file_date = extract_date_from_filename(filename)
+        if file_date:
+            df["date"] = file_date
+            print(f"  - Extracted date: {file_date}")
+        else:
+            print(f"  - Warning: Could not extract date from {filename}, skipping")
+            continue
+
+        df["load_id"] = load_id
+        df["load_ts"] = load_ts
+        df["source_file"] = filename
+
+        all_data.append(df)
+        print(f"  - Rows: {len(df)}")
+
+    # 5) Combine all files
+    if not all_data:
+        raise ValueError("No valid data files processed")
+
+    combined_df = pd.concat(all_data, ignore_index=True)
+
+    # ✅ Summary (fixed indentation)
+    print(f"\n{'=' * 60}")
+    print("SUMMARY:")
+    print(f"{'=' * 60}")
+    print(f"Total rows combined: {len(combined_df)}")
+    print(f"Date range: {combined_df['date'].min()} to {combined_df['date'].max()}")
+
+    asin_col = "(Child) ASIN"
+    if asin_col in combined_df.columns:
+        print(f"Unique ASINs: {combined_df[asin_col].nunique()}")
+    else:
+        print("Unique ASINs: column not found")
+
+    print(f"Unique dates: {combined_df['date'].nunique()}")
+    print(f"{'=' * 60}")
+
+    # 6) Load to PostgreSQL (append mode)
+    combined_df.to_sql(
+        RAW_TABLE,
+        engine,
+        schema=RAW_SCHEMA,
+        if_exists="append",
+        index=False
+    )
+
+    print(f"\n✓ Successfully loaded {len(combined_df)} rows to {RAW_SCHEMA}.{RAW_TABLE}")
+    print(f"✓ Load ID: {load_id}")
+
+
+if __name__ == "__main__":
+    main()

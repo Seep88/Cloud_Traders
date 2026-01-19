@@ -1,0 +1,120 @@
+import os
+import re
+import pandas as pd
+from sqlalchemy import create_engine, text
+
+RAW_SCHEMA = "raw"
+RAW_TABLE = "raw_amazon_business_reports_sales_traffic_child_asin_daily"
+
+STAGING_SCHEMA = "staging"
+STAGING_TABLE = "stg_amazon_business_reports_sales_traffic_child_asin_daily"
+
+
+def snake_case(name: str) -> str:
+    name = name.strip()
+    name = re.sub(r"[^\w]+", "_", name)   # spaces/symbols -> _
+    name = re.sub(r"_+", "_", name)       # collapse repeats
+    return name.strip("_").lower()
+
+
+def safe_numeric(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series.astype(str).str.replace(",", "", regex=False), errors="coerce")
+
+
+def safe_date(series: pd.Series) -> pd.Series:
+    return pd.to_datetime(series, errors="coerce").dt.date
+
+
+def main():
+    db_url = os.getenv("DB_URL")
+    if not db_url:
+        raise ValueError("DB_URL environment variable not set")
+
+    engine = create_engine(db_url)
+
+    # 1) Ensure staging schema exists
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {STAGING_SCHEMA};"))
+
+    # 2) Get latest load_id from RAW (deterministic staging)
+    latest_load_id_sql = text(
+        f"SELECT load_id FROM {RAW_SCHEMA}.{RAW_TABLE} ORDER BY load_ts DESC LIMIT 1"
+    )
+    with engine.begin() as conn:
+        latest_load_id = conn.execute(latest_load_id_sql).scalar()
+
+    if not latest_load_id:
+        raise ValueError("No load_id found in raw table. Run raw loader first.")
+
+    print(f"Processing load_id: {latest_load_id}")
+
+    # 3) Pull only latest load
+    df = pd.read_sql_query(
+        text(f"SELECT * FROM {RAW_SCHEMA}.{RAW_TABLE} WHERE load_id = :load_id"),
+        engine,
+        params={"load_id": latest_load_id},
+    )
+    print(f"Read {len(df)} rows from RAW")
+
+    # 4) Standardize column names
+    df.columns = [snake_case(c) for c in df.columns]
+
+    # 5) Type casting
+    # Your raw loader already creates 'date' column (from filename)
+    if "date" in df.columns:
+        df["date"] = safe_date(df["date"])
+
+    # Common numeric fields in this report (after snake_case)
+    numeric_candidates = [
+        "sessions_total", "sessions_total_b2b",
+        "page_views_total", "page_views_total_b2b",
+        "units_ordered", "units_ordered_b2b",
+        "total_order_items", "total_order_items_b2b",
+    ]
+    for col in numeric_candidates:
+        if col in df.columns:
+            df[col] = safe_numeric(df[col])
+
+    # Currency fields (remove $ and convert)
+    currency_candidates = ["ordered_product_sales", "ordered_product_sales_b2b"]
+    for col in currency_candidates:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace("$", "", regex=False).str.strip()
+            df[col] = safe_numeric(df[col])
+            df.rename(columns={col: f"{col}_usd"}, inplace=True)
+
+    # Percent fields (remove % and keep as number 0-100)
+    percent_candidates = [
+        "session_percentage_total", "session_percentage_total_b2b",
+        "page_views_percentage_total", "page_views_percentage_total_b2b",
+        "featured_offer_buy_box_percentage", "featured_offer_buy_box_percentage_b2b",
+        "unit_session_percentage", "unit_session_percentage_b2b",
+    ]
+    for col in percent_candidates:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace("%", "", regex=False).str.strip()
+            df[col] = safe_numeric(df[col])
+
+    # 6) De-duplicate exact rows (technical dedupe)
+    before = len(df)
+    df = df.drop_duplicates()
+    after = len(df)
+    if before > after:
+        print(f"Removed {before - after} duplicate rows")
+
+    # 7) Write to staging (replace snapshot)
+    df.to_sql(
+        STAGING_TABLE,
+        engine,
+        schema=STAGING_SCHEMA,
+        if_exists="replace",
+        index=False
+    )
+
+    print(f"✓ Staged {len(df)} rows into {STAGING_SCHEMA}.{STAGING_TABLE}")
+    if "date" in df.columns:
+        print(f"✓ Date range: {df['date'].min()} to {df['date'].max()}")
+
+
+if __name__ == "__main__":
+    main()

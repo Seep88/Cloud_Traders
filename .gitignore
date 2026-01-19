@@ -1,0 +1,31 @@
+# --------------------
+# Python / Virtual Env
+# --------------------
+.venv/
+__pycache__/
+*.pyc
+
+# --------------------
+# IDE (PyCharm)
+# --------------------
+.idea/
+
+# --------------------
+# Environment variables
+# --------------------
+.env
+
+# --------------------
+# Data (never commit raw or processed data)
+# --------------------
+data/
+
+# --------------------
+# Logs
+# --------------------
+logs/
+
+# --------------------
+# Power BI (optional – keep excluded for now)
+# --------------------
+*.pbix
