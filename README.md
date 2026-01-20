@@ -2,6 +2,9 @@
 Project Details:
 This project demonstrates an end-to-end analytics workflow: ingesting daily source files, transforming and modeling data in PostgreSQL (staging → warehouse), and delivering KPI-driven Power BI dashboards. It showcases Python ETL development, SQL/data modeling, and operational reporting design.
 
+## Business Impact
+Manual daily performance analysis previously required downloading and reviewing multiple Amazon Seller Central reports, consuming approximately 30–45 minutes per day and limiting consistent date-over-date KPI comparisons. By automating data ingestion and centralizing performance metrics in a Power BI dashboard, daily analysis time was reduced to under 5 minutes, delivering an ~85–90% reduction in manual effort and saving approximately 30–40 minutes per day. This enabled near-real-time visibility into product-level revenue and KPIs, improved trend analysis, and supported faster, data-driven decision-making with minimal operational overhead
+
 ## Key KPIs Delivered
 - Total Revenue
 - Total Session
